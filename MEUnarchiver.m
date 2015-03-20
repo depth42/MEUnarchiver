@@ -8,6 +8,7 @@
     NSMutableArray*         _sharedStrings;
     NSMutableArray*         _sharedObjects;
     NSMutableDictionary*    _classNameMapping;
+    NSMutableDictionary*    _versionByClassName;
 }
 
 static signed char const Long2Label         = -127;     // 0x81
@@ -23,12 +24,12 @@ static signed char const SmallestLabel      = -110;     // 0x92
 - (id)initForReadingWithData:(NSData*)data
 {
     NSParameterAssert(data.length > 0);
-
+    
     if(self = [super init])
     {
         _data = [data copy];
         _pos = 0;
-
+        
         if(![self readHeader])
             return nil;
     }
@@ -45,7 +46,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
 {
     NSParameterAssert(inArchiveName);
     NSParameterAssert(trueName);
-
+    
     if(!_classNameMapping)
         _classNameMapping = [[NSMutableDictionary alloc] init];
     _classNameMapping[inArchiveName] = [trueName copy];
@@ -54,7 +55,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
 - (Class)classForName:(NSString*)className
 {
     NSParameterAssert(className);
-
+    
     NSString* replacement = _classNameMapping[className];
     return NSClassFromString(replacement ? replacement : className);
 }
@@ -66,11 +67,11 @@ static signed char const SmallestLabel      = -110;     // 0x92
         return NO;
     _streamerVersion = streamerVersion;
     NSAssert(streamerVersion == 4, nil);    // we currently only support v4
-
+    
     NSString* header;
     if(![self decodeString:&header])
         return NO;
-
+    
     BOOL isBig = (NSHostByteOrder() == NS_BigEndian);
     if([header isEqualToString:@"typedstream"])
         _swap = !isBig;
@@ -78,11 +79,11 @@ static signed char const SmallestLabel      = -110;     // 0x92
         _swap = isBig;
     else
         return NO;
-
+    
     int systemVersion;
     if(![self decodeInt:&systemVersion])
         return NO;
-
+    
     return YES;
 }
 
@@ -93,14 +94,14 @@ static signed char const SmallestLabel      = -110;     // 0x92
         return NO;
     if(![string isEqualToString:@"@"])
         return NO;
-
+    
     return [self _readObject:outObject];
 }
 
 - (void)registerSharedObject:(id)object
 {
     NSParameterAssert(object);
-
+    
     if(!_sharedObjects)
         _sharedObjects = [[NSMutableArray alloc] init];
     [_sharedObjects addObject:object];
@@ -109,17 +110,17 @@ static signed char const SmallestLabel      = -110;     // 0x92
 - (BOOL)_readObject:(id*)outObject
 {
     NSParameterAssert(outObject);
-
+    
     signed char ch;
     if(![self decodeChar:&ch])
         return NO;
-
+    
     switch(ch)
     {
         case NullLabel:
             *outObject = nil;
             return YES;
-
+            
         case NewLabel:
         {
             Class class;
@@ -127,14 +128,14 @@ static signed char const SmallestLabel      = -110;     // 0x92
                 return NO;
             *outObject = [[class alloc] initWithCoder:self];
             [self registerSharedObject:*outObject];
-
+            
             signed char endMarker;
             if(![self decodeChar:&endMarker] || endMarker != EndOfObjectLabel)
                 return NO;
-
+            
             return YES;
         }
-
+            
         default:
         {
             int objectIndex;
@@ -152,17 +153,17 @@ static signed char const SmallestLabel      = -110;     // 0x92
 - (BOOL)readClass:(Class*)outClass
 {
     NSParameterAssert(outClass);
-
+    
     signed char ch;
     if(![self decodeChar:&ch])
         return NO;
-
+    
     switch(ch)
     {
         case NullLabel:
             *outClass = Nil;
             return YES;
-
+            
         case NewLabel:
         {
             NSString* className;
@@ -171,20 +172,25 @@ static signed char const SmallestLabel      = -110;     // 0x92
             int version;
             if(![self decodeInt:&version])
                 return NO;
+
+            if(!_versionByClassName)
+                _versionByClassName = [[NSMutableDictionary alloc] init];
+            _versionByClassName[className] = @(version);
+
             *outClass = [self classForName:className];
             if(!*outClass)
                 return NO;
-
+            
             [self registerSharedObject:*outClass];
-
+            
             // We do not check the super-class
             Class superClass;
             if(![self readClass:&superClass])
                 return NO;
-
+            
             return YES;
         }
-
+            
         default:
         {
             int objectIndex;
@@ -197,8 +203,8 @@ static signed char const SmallestLabel      = -110;     // 0x92
             return YES;
         }
     }
-
- }
+    
+}
 
 - (BOOL)readBytes:(void*)bytes length:(NSUInteger)length
 {
@@ -218,7 +224,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
 - (BOOL)decodeFloat:(float*)outFloat
 {
     NSParameterAssert(outFloat);
-
+    
     signed char charValue;
     if(![self decodeChar:&charValue])
         return NO;
@@ -233,16 +239,16 @@ static signed char const SmallestLabel      = -110;     // 0x92
     NSSwappedFloat value;
     if(![self readBytes:&value length:sizeof(NSSwappedFloat)])
         return NO;
-
+    
     *outFloat = [self swappedFloat:value];
-
+    
     return YES;
 }
 
 - (BOOL)decodeDouble:(double*)outDouble
 {
     NSParameterAssert(outDouble);
-
+    
     signed char charValue;
     if(![self decodeChar:&charValue])
         return NO;
@@ -257,7 +263,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
     NSSwappedDouble value;
     if(![self readBytes:&value length:sizeof(NSSwappedDouble)])
         return NO;
-
+    
     *outDouble = [self swappedDouble:value];
     return YES;
 }
@@ -265,24 +271,24 @@ static signed char const SmallestLabel      = -110;     // 0x92
 - (BOOL)decodeString:(NSString**)outString
 {
     NSParameterAssert(outString);
-
+    
     signed char charValue;
     if(![self decodeChar:&charValue])
         return NO;
-
+    
     if(charValue == NullLabel)
     {
         *outString = nil;
         return YES;
     }
-
+    
     int length;
     if(![self finishDecodeInt:&length
                      withChar:charValue])
         return NO;
     if(length <= 0)
         return NO;
-
+    
     char bytes[length];
     if(![self readBytes:bytes length:length])
         return NO;
@@ -327,23 +333,23 @@ static signed char const SmallestLabel      = -110;     // 0x92
 - (BOOL)decodeShort:(short*)outShort
 {
     NSParameterAssert(outShort);
-
+    
     signed char ch;
     if(![self decodeChar:&ch])
         return NO;
-
+    
     if(ch != Long2Label)
     {
         *outShort = ch;
         return YES;
     }
-
+    
     short value;
     if(![self readBytes:&value length:2])
         return NO;
-
+    
     *outShort = [self swappedShort:value];
-
+    
     return YES;
 }
 
@@ -360,7 +366,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
                withChar:(signed char)charValue
 {
     NSParameterAssert(outInt);
-
+    
     switch(charValue)
     {
         case Long2Label:
@@ -371,7 +377,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
             *outInt = [self swappedShort:value];
             break;
         }
-
+            
         case Long4Label:
         {
             int value;
@@ -380,7 +386,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
             *outInt = [self swappedInt:value];
             break;
         }
-
+            
         default:
             *outInt = charValue;
             break;
@@ -417,20 +423,20 @@ static signed char const SmallestLabel      = -110;     // 0x92
 {
     NSParameterAssert(type);
     NSParameterAssert(data);
-
+    
     NSString* string;
     if(![self decodeSharedString:&string] || string.length == 0)
         return NO;
-
+    
     const char* str = string.UTF8String;
     if(strcmp(str, type) != 0)
     {
-        NSLog(@"wrong type in archive");
+        NSLog(@"wrong type in archive '%s', expected '%s'", str, type);
         return NO;
     }
-
+    
     char ch = str[0];
-
+    
     switch(ch)
     {
         case 'c':
@@ -442,7 +448,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
             *((char*)data) = (char)value;
             break;
         }
-
+            
         case 's':
         case 'S':
         {
@@ -452,7 +458,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
             *((short*)data) = value;
             break;
         }
-
+            
         case 'i':
         case 'I':
         case 'l':
@@ -464,7 +470,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
             *((int*)data) = value;
             break;
         }
-
+            
         case 'f':
         {
             float value;
@@ -473,7 +479,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
             *((float*)data) = value;
             break;
         }
-
+            
         case 'd':
         {
             double value;
@@ -482,7 +488,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
             *((double*)data) = value;
             break;
         }
-
+            
         default:
             NSLog(@"unsupported archiving type %c", ch);
             return NO;
@@ -498,10 +504,10 @@ static signed char const SmallestLabel      = -110;     // 0x92
                                 asClassName:(NSString*)className
 {
     NSParameterAssert(!archiveClassName || className);
-
+    
     if(!data)
         return nil;
-
+    
 #if UXTARGET_IOS
     MEUnarchiver* unarchiver = [[MEUnarchiver alloc] initForReadingWithData:data];
     if(archiveClassName)
@@ -521,11 +527,11 @@ static signed char const SmallestLabel      = -110;     // 0x92
 {
     NSParameterAssert(type);
     NSParameterAssert(data);
-
+    
     // Make sure that even under iOS BOOLs are read with 'c' type.
     if(strcmp(type, @encode(BOOL)) == 0)
         type = "c";
-
+    
     [self readType:type data:data];
 }
 
@@ -535,4 +541,11 @@ static signed char const SmallestLabel      = -110;     // 0x92
     [self readObject:&obj];
     return obj;
 }
+
+- (NSInteger)versionForClassName:(NSString *)className
+{
+    NSParameterAssert(className);
+    return ((NSNumber*)_versionByClassName[className]).integerValue;
+}
+
 @end
