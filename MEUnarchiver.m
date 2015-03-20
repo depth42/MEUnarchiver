@@ -15,7 +15,6 @@
     NSUInteger              _sharedObjectCounter;
     NSMutableDictionary*    _classNameMapping;
     NSMutableDictionary*    _versionByClassName;
-    NSMutableArray*         _buffers;
 }
 
 static signed char const Long2Label         = -127;     // 0x81
@@ -77,7 +76,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
     NSAssert(streamerVersion == 4, nil);    // we currently only support v4
     
     NSString* header;
-    if(![self decodeString:&header])
+    if(![self decodeCharsAsString:&header])
         return NO;
     
     BOOL isBig = (NSHostByteOrder() == NS_BigEndian);
@@ -133,7 +132,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
                 return NO;
             id object = [[objectClass alloc] initWithCoder:self];
             _sharedObjects[label] = object;
-            id objectAfterAwake  = [object awakeAfterUsingCoder:self];
+            id objectAfterAwake = [object awakeAfterUsingCoder:self];
             if(objectAfterAwake && objectAfterAwake != object)
             {
                 object = objectAfterAwake;
@@ -214,14 +213,26 @@ static signed char const SmallestLabel      = -110;     // 0x92
             return YES;
         }
     }
-    
 }
 
 - (BOOL)readBytes:(void*)bytes length:(NSUInteger)length
 {
+    NSParameterAssert(bytes);
+    
     if(_pos + length > _data.length)
         return NO;
     [_data getBytes:bytes range:NSMakeRange(_pos, length)];
+    _pos += length;
+    return YES;
+}
+
+- (BOOL)readData:(NSData**)outData length:(NSUInteger)length
+{
+    NSParameterAssert(outData);
+    
+    if(_pos + length > _data.length)
+        return NO;
+    *outData = [_data subdataWithRange:NSMakeRange(_pos, length)];
     _pos += length;
     return YES;
 }
@@ -279,7 +290,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
     return YES;
 }
 
-- (BOOL)decodeString:(NSString**)outString
+- (BOOL)decodeCharsAsString:(NSString**)outString
 {
     NSParameterAssert(outString);
     
@@ -305,8 +316,43 @@ static signed char const SmallestLabel      = -110;     // 0x92
         return NO;
     *outString = [[NSString alloc] initWithBytes:bytes
                                           length:length
-                                        encoding:NSUTF8StringEncoding];
+                                        encoding:NSASCIIStringEncoding];
     return YES;
+}
+
+- (BOOL)decodeString:(NSString**)outString
+{
+    NSParameterAssert(outString);
+    
+    signed char charValue;
+    if(![self decodeChar:&charValue])
+        return NO;
+    
+    switch(charValue)
+    {
+        case NullLabel:
+            *outString = nil;
+            return YES;
+            
+        case NewLabel:
+            if(![self decodeSharedString:outString])
+                return NO;
+            
+            _sharedObjects[[self nextSharedObjectLabel]] = *outString;
+            return YES;
+            
+        default:
+        {
+            int label;
+            if(![self finishDecodeInt:&label withChar:charValue])
+                return NO;
+            label = BIAS(label);
+            if(label >= _sharedObjects.count)
+                return NO;
+            *outString = _sharedObjects[@(label)];
+            return YES;
+        }
+    }
 }
 
 - (BOOL)decodeSharedString:(NSString**)outString
@@ -321,7 +367,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
     }
     if(ch == NewLabel)
     {
-        if(![self decodeString:outString])
+        if(![self decodeCharsAsString:outString])
             return NO;
         [_sharedStrings addObject:*outString];
     }
@@ -433,18 +479,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
     NSParameterAssert(type);
     NSParameterAssert(data);
     
-    NSString* string;
-    if(![self decodeSharedString:&string] || string.length == 0)
-        return NO;
-    
-    const char* str = string.UTF8String;
-    if(strcmp(str, type) != 0)
-    {
-        NSLog(@"wrong type in archive '%s', expected '%s'", str, type);
-        return NO;
-    }
-    
-    char ch = str[0];
+    char ch = type[0];
     
     switch(ch)
     {
@@ -507,6 +542,27 @@ static signed char const SmallestLabel      = -110;     // 0x92
             break;
         }
             
+        case '*':
+        {
+            NSString* string;
+            if(![self decodeString:&string])
+                return NO;
+            
+            // Freeing of the string seems to be the responsibilty of the caller.
+            // NSCoding implementations of Foundation classes all seem to do this.
+            char* cString = malloc(string.length + 1);  // +1 because of null-termination
+            [string getBytes:cString
+                   maxLength:string.length
+                  usedLength:NULL
+                    encoding:NSASCIIStringEncoding
+                     options:0
+                       range:NSMakeRange(0, string.length)
+              remainingRange:NULL];
+            cString[string.length] = '\0';
+            *((const char**)data) = cString;
+            break;
+        }
+            
         default:
             NSLog(@"unsupported archiving type %c", ch);
             return NO;
@@ -550,7 +606,44 @@ static signed char const SmallestLabel      = -110;     // 0x92
     if(strcmp(type, @encode(BOOL)) == 0)
         type = "c";
     
-    [self readType:type data:data];
+    NSString* string;
+    if(![self decodeSharedString:&string] || string.length == 0)
+        return;
+    
+    const char* str = string.UTF8String;
+    if(strcmp(str, type) != 0)
+    {
+        NSLog(@"wrong type in archive '%s', expected '%s'", str, type);
+        return;
+    }
+    
+    [self readType:str data:data];
+}
+
+- (void)decodeValuesOfObjCTypes:(const char*)types, ...
+{
+    NSString* string;
+    if(![self decodeSharedString:&string])
+        return;
+    
+    if(strcmp([string cStringUsingEncoding:NSASCIIStringEncoding], types) != 0)
+    {
+        NSLog(@"wrong types in archive '%@', expected '%s'", string, types);
+        return;
+    }
+    
+    va_list argList;
+    va_start (argList, types);
+    
+    const char* type = types;
+    while(*type != '\0')
+    {
+        void* data = va_arg(argList, void*);
+        [self readType:type data:data];
+        type++;
+    }
+    
+    va_end (argList);
 }
 
 - (void*)decodeBytesWithReturnedLength:(NSUInteger*)outLength
@@ -568,27 +661,12 @@ static signed char const SmallestLabel      = -110;     // 0x92
     if(![self decodeInt:&length])
         return NULL;
     
-    void* bytes = malloc(length);
-    if(!bytes)
+    NSData* data;
+    if(![self readData:&data length:length])
         return NULL;
-    
-    if(![self readBytes:bytes length:length])
-    {
-        free(bytes);
-        return NULL;
-    }
-    
-    // The spec requires that we return the data in a buffer which lives until the autorelease pool pops.
-    // To achieve this perfectly, it would require me to add non-ARC code.
-    // I currently do not want to do this and fake this by freeing the buffer together with the archiver.
-    // This approach is not very efficient but I doubt that this will cause any harm.
-    NSData* data = [[NSData alloc] initWithBytesNoCopy:bytes length:length freeWhenDone:YES];
-    if(!_buffers)
-        _buffers = [[NSMutableArray alloc] init];
-    [_buffers addObject:data];
     
     *outLength = length;
-    return bytes;
+    return (void*)data.bytes;
 }
 
 - (id)decodeObject
