@@ -1,3 +1,8 @@
+//
+//  MEUnarchiver.m
+//
+//  Created by Frank Illenberger on 13.03.15.
+
 #import "MEUnarchiver.h"
 
 @implementation MEUnarchiver
@@ -6,9 +11,11 @@
     int                     _streamerVersion;
     BOOL                    _swap;
     NSMutableArray*         _sharedStrings;
-    NSMutableArray*         _sharedObjects;
+    NSMutableDictionary*    _sharedObjects;
+    NSUInteger              _sharedObjectCounter;
     NSMutableDictionary*    _classNameMapping;
     NSMutableDictionary*    _versionByClassName;
+    NSMutableArray*         _buffers;
 }
 
 static signed char const Long2Label         = -127;     // 0x81
@@ -29,7 +36,8 @@ static signed char const SmallestLabel      = -110;     // 0x92
     {
         _data = [data copy];
         _pos = 0;
-        
+        _sharedObjects = [[NSMutableDictionary alloc] init];
+        _sharedStrings = [[NSMutableArray alloc] init];
         if(![self readHeader])
             return nil;
     }
@@ -98,13 +106,9 @@ static signed char const SmallestLabel      = -110;     // 0x92
     return [self _readObject:outObject];
 }
 
-- (void)registerSharedObject:(id)object
+- (NSNumber*)nextSharedObjectLabel
 {
-    NSParameterAssert(object);
-    
-    if(!_sharedObjects)
-        _sharedObjects = [[NSMutableArray alloc] init];
-    [_sharedObjects addObject:object];
+    return @(_sharedObjectCounter++);
 }
 
 - (BOOL)_readObject:(id*)outObject
@@ -123,11 +127,19 @@ static signed char const SmallestLabel      = -110;     // 0x92
             
         case NewLabel:
         {
-            Class class;
-            if(![self readClass:&class])
+            NSNumber* label = [self nextSharedObjectLabel];
+            Class objectClass;
+            if(![self readClass:&objectClass])
                 return NO;
-            *outObject = [[class alloc] initWithCoder:self];
-            [self registerSharedObject:*outObject];
+            id object = [[objectClass alloc] initWithCoder:self];
+            _sharedObjects[label] = object;
+            id objectAfterAwake  = [object awakeAfterUsingCoder:self];
+            if(objectAfterAwake && objectAfterAwake != object)
+            {
+                object = objectAfterAwake;
+                _sharedObjects[label] = objectAfterAwake;
+            }
+            *outObject = object;
             
             signed char endMarker;
             if(![self decodeChar:&endMarker] || endMarker != EndOfObjectLabel)
@@ -138,13 +150,13 @@ static signed char const SmallestLabel      = -110;     // 0x92
             
         default:
         {
-            int objectIndex;
-            if(![self finishDecodeInt:&objectIndex withChar:ch])
+            int label;
+            if(![self finishDecodeInt:&label withChar:ch])
                 return NO;
-            objectIndex = BIAS(objectIndex);
-            if(objectIndex >= _sharedObjects.count)
+            label = BIAS(label);
+            if(label >= _sharedObjects.count)
                 return NO;
-            *outObject = _sharedObjects[objectIndex];
+            *outObject = _sharedObjects[@(label)];
             return YES;
         }
     }
@@ -172,34 +184,33 @@ static signed char const SmallestLabel      = -110;     // 0x92
             int version;
             if(![self decodeInt:&version])
                 return NO;
-
+            
             if(!_versionByClassName)
                 _versionByClassName = [[NSMutableDictionary alloc] init];
             _versionByClassName[className] = @(version);
-
+            
             *outClass = [self classForName:className];
             if(!*outClass)
                 return NO;
             
-            [self registerSharedObject:*outClass];
+            _sharedObjects[[self nextSharedObjectLabel]] = *outClass;
             
             // We do not check the super-class
             Class superClass;
             if(![self readClass:&superClass])
                 return NO;
-            
             return YES;
         }
             
         default:
         {
-            int objectIndex;
-            if(![self finishDecodeInt:&objectIndex withChar:ch])
+            int label;
+            if(![self finishDecodeInt:&label withChar:ch])
                 return NO;
-            objectIndex = BIAS(objectIndex);
-            if(objectIndex >= _sharedObjects.count)
+            label = BIAS(label);
+            if(label >= _sharedObjects.count)
                 return NO;
-            *outClass = _sharedObjects[objectIndex];
+            *outClass = _sharedObjects[@(label)];
             return YES;
         }
     }
@@ -312,8 +323,6 @@ static signed char const SmallestLabel      = -110;     // 0x92
     {
         if(![self decodeString:outString])
             return NO;
-        if(!_sharedStrings)
-            _sharedStrings = [[NSMutableArray alloc] init];
         [_sharedStrings addObject:*outString];
     }
     else
@@ -489,6 +498,15 @@ static signed char const SmallestLabel      = -110;     // 0x92
             break;
         }
             
+        case '@':
+        {
+            id obj;
+            if(![self _readObject:&obj])
+                return NO;
+            *((__strong id*)data) = obj;
+            break;
+        }
+            
         default:
             NSLog(@"unsupported archiving type %c", ch);
             return NO;
@@ -533,6 +551,44 @@ static signed char const SmallestLabel      = -110;     // 0x92
         type = "c";
     
     [self readType:type data:data];
+}
+
+- (void*)decodeBytesWithReturnedLength:(NSUInteger*)outLength
+{
+    NSParameterAssert(outLength);
+    
+    *outLength = 0;
+    NSString* string;
+    if(![self decodeSharedString:&string])
+        return NULL;
+    if(![string isEqualToString:@"+"])
+        return NULL;
+    
+    int length;
+    if(![self decodeInt:&length])
+        return NULL;
+    
+    void* bytes = malloc(length);
+    if(!bytes)
+        return NULL;
+    
+    if(![self readBytes:bytes length:length])
+    {
+        free(bytes);
+        return NULL;
+    }
+    
+    // The spec requires that we return the data in a buffer which lives until the autorelease pool pops.
+    // To achieve this perfectly, it would require me to add non-ARC code.
+    // I currently do not want to do this and fake this by freeing the buffer together with the archiver.
+    // This approach is not very efficient but I doubt that this will cause any harm.
+    NSData* data = [[NSData alloc] initWithBytesNoCopy:bytes length:length freeWhenDone:YES];
+    if(!_buffers)
+        _buffers = [[NSMutableArray alloc] init];
+    [_buffers addObject:data];
+    
+    *outLength = length;
+    return bytes;
 }
 
 - (id)decodeObject
