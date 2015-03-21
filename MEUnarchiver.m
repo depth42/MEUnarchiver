@@ -37,6 +37,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
         _pos = 0;
         _sharedObjects = [[NSMutableDictionary alloc] init];
         _sharedStrings = [[NSMutableArray alloc] init];
+        _versionByClassName = [[NSMutableDictionary alloc] init];
         if(![self readHeader])
             return nil;
     }
@@ -184,8 +185,6 @@ static signed char const SmallestLabel      = -110;     // 0x92
             if(![self decodeInt:&version])
                 return NO;
             
-            if(!_versionByClassName)
-                _versionByClassName = [[NSMutableDictionary alloc] init];
             _versionByClassName[className] = @(version);
             
             *outClass = [self classForName:className];
@@ -327,7 +326,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
     signed char charValue;
     if(![self decodeChar:&charValue])
         return NO;
-    
+
     switch(charValue)
     {
         case NullLabel:
@@ -340,7 +339,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
             
             _sharedObjects[[self nextSharedObjectLabel]] = *outString;
             return YES;
-            
+        
         default:
         {
             int label;
@@ -480,7 +479,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
     NSParameterAssert(data);
     
     char ch = type[0];
-    
+
     switch(ch)
     {
         case 'c':
@@ -631,7 +630,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
         NSLog(@"wrong types in archive '%@', expected '%s'", string, types);
         return;
     }
-    
+
     va_list argList;
     va_start (argList, types);
     
