@@ -20,7 +20,7 @@
 static signed char const Long2Label         = -127;     // 0x81
 static signed char const Long4Label         = -126;     // 0x82
 static signed char const RealLabel          = -125;     // 0x83
-static signed char const NewLabel           = -124;     // 0x84    denotes the start of a new shared string
+static signed char const NewLabel           = -124;     // 0x84
 static signed char const NullLabel          = -123;     // 0x85
 static signed char const EndOfObjectLabel   = -122;     // 0x86
 static signed char const SmallestLabel      = -110;     // 0x92
@@ -582,7 +582,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
     if(!data)
         return nil;
     
-#if UXTARGET_IOS
+#if (TARGET_OS_IPHONE || TARGET_IPHONE_SIMULATOR)
     MEUnarchiver* unarchiver = [[MEUnarchiver alloc] initForReadingWithData:data];
     if(archiveClassName)
         [unarchiver decodeClassName:archiveClassName asClassName:className];
