@@ -132,6 +132,8 @@ static signed char const SmallestLabel      = -110;     // 0x92
             if(![self readClass:&objectClass])
                 return NO;
             id object = [[objectClass alloc] initWithCoder:self];
+            if(!object)
+                return NO;
             _sharedObjects[label] = object;
             id objectAfterAwake = [object awakeAfterUsingCoder:self];
             if(objectAfterAwake && objectAfterAwake != object)
@@ -336,7 +338,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
         case NewLabel:
             if(![self decodeSharedString:outString])
                 return NO;
-            
+            NSAssert(*outString, nil);
             _sharedObjects[[self nextSharedObjectLabel]] = *outString;
             return YES;
         
@@ -356,6 +358,8 @@ static signed char const SmallestLabel      = -110;     // 0x92
 
 - (BOOL)decodeSharedString:(NSString**)outString
 {
+    NSParameterAssert(outString);
+
     signed char ch;
     if(![self decodeChar:&ch])
         return NO;
@@ -368,6 +372,7 @@ static signed char const SmallestLabel      = -110;     // 0x92
     {
         if(![self decodeCharsAsString:outString])
             return NO;
+        NSAssert(*outString, nil);
         [_sharedStrings addObject:*outString];
     }
     else
